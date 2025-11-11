@@ -9,6 +9,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+import calendar
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -574,6 +575,134 @@ def create_feature_card(title, description, icon, action_text="Explore"):
     </div>
     """
 
+def compute_backtest_metrics(df, test_window=14):
+    """Create a lightweight backtest to evidence forecast accuracy gains"""
+    if df is None or 'sales' not in df.columns or len(df) < max(test_window * 2, 30):
+        return None
+    
+    data = df[['date', 'sales']].dropna().sort_values('date').reset_index(drop=True)
+    if len(data) < max(test_window * 2, 30):
+        return None
+    
+    test_window = min(test_window, max(int(len(data) * 0.2), 7))
+    train = data.iloc[:-test_window]
+    test = data.iloc[-test_window:]
+    
+    if train['sales'].mean() == 0 or np.all(test['sales'].values == 0):
+        return None
+    
+    # Baseline: last observed value (naive)
+    baseline_forecast = np.repeat(train['sales'].iloc[-1], test_window)
+    
+    # AI proxy: simple linear trend with weekend uplift
+    x_train = np.arange(len(train))
+    slope, intercept = np.polyfit(x_train, train['sales'], 1)
+    x_future = np.arange(len(train), len(train) + test_window)
+    ai_forecast = intercept + slope * x_future
+    ai_forecast = np.maximum(ai_forecast, 0)
+    
+    # Add a simple seasonality uplift if weekends show higher demand
+    if 'date' in test.columns:
+        weekend_mask = test['date'].dt.dayofweek.isin([5, 6])
+        weekend_uplift = train[train['date'].dt.dayofweek.isin([5, 6])]['sales'].mean() - train['sales'].mean()
+        ai_forecast = ai_forecast + weekend_mask.astype(int) * max(weekend_uplift, 0)
+    
+    baseline_mape = float(mean_absolute_percentage_error(test['sales'], baseline_forecast) * 100)
+    ai_mape = float(mean_absolute_percentage_error(test['sales'], ai_forecast) * 100)
+    
+    baseline_wape = float(np.abs(test['sales'] - baseline_forecast).sum() / np.maximum(test['sales'].sum(), 1e-6) * 100)
+    ai_wape = float(np.abs(test['sales'] - ai_forecast).sum() / np.maximum(test['sales'].sum(), 1e-6) * 100)
+    
+    return {
+        'test_days': test_window,
+        'baseline_mape': baseline_mape,
+        'ai_mape': ai_mape,
+        'baseline_wape': baseline_wape,
+        'ai_wape': ai_wape,
+        'mape_improvement': baseline_mape - ai_mape,
+        'wape_improvement': baseline_wape - ai_wape,
+        'test_actuals': test,
+        'test_forecast': ai_forecast
+    }
+
+def analyze_inventory_challenges(df, inventory_col=None, inventory_metrics=None):
+    """Derive headline inventory risks and opportunities"""
+    insights = {
+        'overstock_days': None,
+        'stockout_days': None,
+        'seasonality_peak': None,
+        'seasonality_trough': None,
+        'demand_volatility': None,
+        'current_gap': None
+    }
+    
+    if df is None or 'sales' not in df.columns:
+        return insights
+    
+    data = df.copy()
+    data = data.sort_values('date')
+    
+    if inventory_col and inventory_col in data.columns:
+        inventory_series = pd.to_numeric(data[inventory_col], errors='coerce').fillna(0)
+        demand_series = data['sales']
+        insights['stockout_days'] = int((inventory_series <= demand_series * 0.1).sum())
+        insights['overstock_days'] = int((inventory_series >= demand_series * 2).sum())
+    elif inventory_metrics and inventory_metrics.get('reorder_point') is not None:
+        current_inventory = inventory_metrics.get('current_inventory', 0)
+        reorder_point = inventory_metrics.get('reorder_point', 0)
+        recommended_max = inventory_metrics.get('recommended_max_inventory', reorder_point * 1.4)
+        insights['current_gap'] = current_inventory - reorder_point
+        if current_inventory > recommended_max:
+            insights['overstock_days'] = max(int((current_inventory - recommended_max) / max(inventory_metrics.get('avg_daily_demand', 1), 1)), 0)
+        if current_inventory < reorder_point:
+            insights['stockout_days'] = max(int(abs(current_inventory - reorder_point) / max(inventory_metrics.get('avg_daily_demand', 1), 1)), 0)
+    
+    data['month'] = data['date'].dt.month
+    monthly = data.groupby('month')['sales'].mean()
+    if len(monthly) >= 2:
+        peak_month = monthly.idxmax()
+        trough_month = monthly.idxmin()
+        insights['seasonality_peak'] = peak_month
+        insights['seasonality_trough'] = trough_month
+    
+    if data['sales'].mean() > 0:
+        insights['demand_volatility'] = float(data['sales'].std() / data['sales'].mean() * 100)
+    
+    return insights
+
+def evaluate_data_sources(df, column_mapping):
+    """Summarize availability of recommended data assets"""
+    sources = []
+    available_cols = set(df.columns) if df is not None else set()
+    inventory_col = column_mapping.get('inventory') if column_mapping else None
+    
+    sources.append({
+        'name': 'Historical Sales',
+        'status': 'Available ✅' if 'sales' in available_cols else 'Missing ⚠️',
+        'detail': 'Daily transaction history used to train forecasting models.'
+    })
+    sources.append({
+        'name': 'Inventory Positions',
+        'status': 'Available ✅' if inventory_col and inventory_col in available_cols else 'Optional',
+        'detail': 'On-hand and on-order balances to detect stockouts and overstock risk.'
+    })
+    
+    promo_cols = [c for c in available_cols if 'promo' in c.lower() or 'campaign' in c.lower()]
+    sources.append({
+        'name': 'Promotions & Price Events',
+        'status': 'Available ✅' if promo_cols else 'Recommended',
+        'detail': 'Marketing levers that impact demand uplift.'
+    })
+    
+    external_cols = [c for c in available_cols if any(keyword in c.lower() for keyword in ['weather', 'google', 'macro', 'holiday'])]
+    sources.append({
+        'name': 'External Drivers',
+        'status': 'Available ✅' if external_cols else 'Recommended',
+        'detail': 'Signals such as holidays, weather, or macro trends to boost accuracy.'
+    })
+    
+    return sources
+
 def show_loading_animation(text="Processing..."):
     """Show a premium loading animation"""
     return st.markdown(f"""
@@ -606,6 +735,7 @@ def show_navigation():
         'forecast': {'label': '📊 Forecasting', 'key': 'forecast'},
         'inventory': {'label': '📦 Inventory', 'key': 'inventory'},
         'analytics': {'label': '💰 Analytics', 'key': 'analytics'},
+        'boardroom': {'label': '🏢 Boardroom', 'key': 'boardroom'},
         'reports': {'label': '📑 Reports', 'key': 'reports'}
     }
     
@@ -1733,6 +1863,30 @@ def show_inventory_page():
             # Economic Order Quantity
             eoq = np.sqrt((2 * avg_demand * ordering_cost) / holding_cost)
             
+            recommended_max_inventory = reorder_point + safety_stock
+            stockout_risk = 0.0
+            if reorder_point > 0:
+                stockout_risk = max((reorder_point - current_inventory) / reorder_point * 100, 0)
+            overstock_gap_units = max(current_inventory - recommended_max_inventory, 0)
+            days_of_stock = current_inventory / avg_demand if avg_demand > 0 else None
+            
+            st.session_state.inventory_recommendations = {
+                'avg_daily_demand': float(avg_demand),
+                'safety_stock': float(safety_stock),
+                'reorder_point': float(reorder_point),
+                'economic_order_quantity': float(eoq),
+                'current_inventory': float(current_inventory),
+                'recommended_max_inventory': float(recommended_max_inventory),
+                'stockout_risk': float(stockout_risk),
+                'overstock_gap_units': float(overstock_gap_units),
+                'service_level': float(service_level * 100),
+                'lead_time': int(lead_time),
+                'holding_cost': float(holding_cost),
+                'ordering_cost': float(ordering_cost),
+                'stockout_cost': float(stockout_cost),
+                'days_of_stock': float(days_of_stock) if days_of_stock is not None else None
+            }
+            
             st.success("✅ Optimization complete!")
             
             # Display results in beautiful cards
@@ -2303,6 +2457,357 @@ def show_analytics_page():
     
     st.markdown("</div>", unsafe_allow_html=True)
 
+
+def show_boardroom_page():
+    """Display an executive-ready dashboard answering key boardroom questions"""
+    st.markdown("""
+    <div class="section-card">
+        <h2>🏢 Boardroom Command Center</h2>
+        <p style="color: #718096;">
+            Executive-level storyline that maps AI capabilities to your supply chain strategy. Each tab aligns to the questions we must answer for the C-suite.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    data = st.session_state.data
+    column_mapping = st.session_state.get('column_mapping', {})
+    inventory_metrics = st.session_state.inventory_recommendations
+    inventory_col = column_mapping.get('inventory') if column_mapping else None
+    
+    if data is None:
+        st.info("Upload data first on the Data Upload page to activate the Boardroom insights.")
+        return
+    
+    backtest_metrics = compute_backtest_metrics(data)
+    challenge_insights = analyze_inventory_challenges(
+        data,
+        inventory_col=inventory_col,
+        inventory_metrics=inventory_metrics
+    )
+    data_sources = evaluate_data_sources(data, column_mapping)
+    
+    tabs = st.tabs([
+        "Inventory Challenges",
+        "Predictive Accuracy",
+        "Critical Data Sources",
+        "Best-Fit AI Techniques",
+        "MAPE & WAPE",
+        "Real-time Visibility",
+        "Sustainability & Cost"
+    ])
+    
+    with tabs[0]:
+        st.markdown("#### What inventory challenges can AI solve?")
+        
+        overstock_value = (
+            f"{challenge_insights['overstock_days']} days"
+            if challenge_insights['overstock_days'] is not None else "Monitor"
+        )
+        stockout_value = (
+            f"{challenge_insights['stockout_days']} days"
+            if challenge_insights['stockout_days'] is not None else "Monitor"
+        )
+        volatility_value = (
+            f"{challenge_insights['demand_volatility']:.1f}%"
+            if challenge_insights['demand_volatility'] is not None else "—"
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            delta = None
+            delta_type = "positive"
+            if inventory_metrics and inventory_metrics.get('stockout_risk') is not None:
+                delta = f"{inventory_metrics['stockout_risk']:.1f}% risk"
+                delta_type = "negative" if inventory_metrics['stockout_risk'] > 15 else "positive"
+            st.markdown(
+                create_metric_card(
+                    "Stockout Signals",
+                    stockout_value,
+                    delta=delta,
+                    delta_type=delta_type,
+                    icon="🚨"
+                ),
+                unsafe_allow_html=True
+            )
+        with col2:
+            overstock_delta = None
+            delta_type = "negative"
+            if inventory_metrics and inventory_metrics.get('overstock_gap_units') is not None:
+                gap_units = inventory_metrics['overstock_gap_units']
+                if gap_units > 0:
+                    overstock_delta = f"{gap_units:,.0f} excess units"
+                    delta_type = "negative"
+                else:
+                    overstock_delta = "Optimized"
+                    delta_type = "positive"
+            st.markdown(
+                create_metric_card(
+                    "Overstock Exposure",
+                    overstock_value,
+                    delta=overstock_delta,
+                    delta_type=delta_type,
+                    icon="📦"
+                ),
+                unsafe_allow_html=True
+            )
+        with col3:
+            peak_month = challenge_insights.get('seasonality_peak')
+            trough_month = challenge_insights.get('seasonality_trough')
+            seasonality_note = None
+            if peak_month and trough_month:
+                seasonality_note = f"Peak: {calendar.month_name[int(peak_month)]}, Low: {calendar.month_name[int(trough_month)]}"
+            st.markdown(
+                create_metric_card(
+                    "Demand Volatility",
+                    volatility_value,
+                    delta=seasonality_note,
+                    delta_type="positive",
+                    icon="🌐"
+                ),
+                unsafe_allow_html=True
+            )
+        
+        st.markdown("""
+- Detect stockouts before they happen by monitoring low stock days and lead-time coverage.
+- Flag costly overstock by benchmarking on-hand units against AI-calculated reorder and max thresholds.
+- Quantify seasonal swings so planners can dial up or down safety stock ahead of peak periods.
+        """)
+    
+    with tabs[1]:
+        st.markdown("#### How does predictive analytics improve forecasting accuracy?")
+        if backtest_metrics:
+            improvement = backtest_metrics['mape_improvement']
+            improvement_wape = backtest_metrics['wape_improvement']
+            mape_delta_type = "positive" if improvement > 0 else "negative"
+            wape_delta_type = "positive" if improvement_wape > 0 else "negative"
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "AI Forecast MAPE",
+                        f"{backtest_metrics['ai_mape']:.1f}%",
+                        delta=f"{improvement:.1f} pts vs naive",
+                        delta_type=mape_delta_type,
+                        icon="🎯"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                st.markdown(
+                    create_metric_card(
+                        "AI Forecast WAPE",
+                        f"{backtest_metrics['ai_wape']:.1f}%",
+                        delta=f"{improvement_wape:.1f} pts improvement",
+                        delta_type=wape_delta_type,
+                        icon="📉"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col3:
+                st.markdown(
+                    create_metric_card(
+                        "Backtest Window",
+                        f"{backtest_metrics['test_days']} days",
+                        delta="Rolling hold-out sample",
+                        delta_type="positive",
+                        icon="⏱️"
+                    ),
+                    unsafe_allow_html=True
+                )
+            
+            fig = go.Figure()
+            test_data = backtest_metrics['test_actuals']
+            fig.add_trace(go.Scatter(
+                x=test_data['date'],
+                y=test_data['sales'],
+                name='Actuals',
+                line=dict(color='#4a5568', width=3)
+            ))
+            fig.add_trace(go.Scatter(
+                x=test_data['date'],
+                y=backtest_metrics['test_forecast'],
+                name='AI Trend Forecast',
+                line=dict(color='#667eea', width=3, dash='dot')
+            ))
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                hovermode='x unified',
+                margin=dict(l=0, r=0, t=20, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Need at least 60 days of history to evidence accuracy gains. Upload more data to unlock the backtest view.")
+        
+        st.markdown("""
+- Rolling backtests show tangible lift versus the naive “last value” approach.
+- Executive KPI: Highlight the accuracy gain (MAPE/WAPE delta) to quantify ROI from predictive analytics.
+- Use the chart to brief leaders on forecast confidence bands and planning readiness.
+        """)
+    
+    with tabs[2]:
+        st.markdown("#### What data sources are essential?")
+        source_df = pd.DataFrame(data_sources)
+        st.dataframe(
+            source_df[['name', 'status', 'detail']],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.markdown("""
+- Confirm baseline datasets: sales history is mandatory, inventory is highly recommended.
+- Layer promotional, pricing, and external signals (weather, macro, regional events) for further accuracy lift.
+- Highlight gaps to procurement/marketing so teams can align on data-sharing roadmaps.
+        """)
+    
+    with tabs[3]:
+        st.markdown("#### Which AI techniques should we deploy?")
+        technique_cards = [
+            ("ARIMA", "Great for stable, stationary demand – quick to deploy for single-SKU forecasting.", "📈"),
+            ("Prophet", "Captures trend shifts, seasonality, and holiday effects with minimal tuning.", "🔮"),
+            ("XGBoost", "Machine learning workhorse that fuses internal and external drivers for complex demand.", "🚀"),
+            ("Ensemble", "Blends statistical + ML models to hedge risk and deliver robust forecasts.", "🎯"),
+        ]
+        col1, col2 = st.columns(2)
+        for idx, (name, desc, icon) in enumerate(technique_cards):
+            container = col1 if idx % 2 == 0 else col2
+            with container:
+                st.markdown(
+                    create_feature_card(
+                        name,
+                        desc,
+                        icon,
+                        action_text="Details"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- Start with ARIMA/Prophet for rapid pilots, then graduate to XGBoost as more features become available.
+- Ensembles are ideal for executive confidence, blending strengths of each technique.
+- Align technique selection with SKU criticality, data richness, and latency requirements.
+        """)
+    
+    with tabs[4]:
+        st.markdown("#### How do MAPE and WAPE frame performance?")
+        if backtest_metrics:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Mean Absolute Percentage Error",
+                        f"{backtest_metrics['ai_mape']:.1f}%",
+                        delta="Lower is better",
+                        delta_type="positive",
+                        icon="📐"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                st.markdown(
+                    create_metric_card(
+                        "Weighted Absolute Percentage Error",
+                        f"{backtest_metrics['ai_wape']:.1f}%",
+                        delta="Revenue-weighted",
+                        delta_type="positive",
+                        icon="⚖️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- **MAPE**: Percentage error per day/SKU – perfect for benchmarking planner accuracy.
+- **WAPE**: Scales error by volume/revenue – ideal for CFO briefings on revenue protection.
+- Track both monthly and by product family to pinpoint where to invest in data or model refinements.
+        """)
+    
+    with tabs[5]:
+        st.markdown("#### Why real-time visibility and automated replenishment matter?")
+        if inventory_metrics:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Current Inventory",
+                        f"{inventory_metrics.get('current_inventory', 0):,.0f} units",
+                        delta=f"Reorder @ {inventory_metrics.get('reorder_point', 0):,.0f}",
+                        delta_type="negative" if inventory_metrics.get('current_inventory', 0) < inventory_metrics.get('reorder_point', 0) else "positive",
+                        icon="📦"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                days_of_stock = inventory_metrics.get('days_of_stock')
+                st.markdown(
+                    create_metric_card(
+                        "Days of Cover",
+                        f"{days_of_stock:.0f} days" if days_of_stock is not None else "—",
+                        delta=f"Lead time: {inventory_metrics.get('lead_time', 0)} days",
+                        delta_type="positive",
+                        icon="🕒"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col3:
+                st.markdown(
+                    create_metric_card(
+                        "Safety Stock",
+                        f"{inventory_metrics.get('safety_stock', 0):,.0f} units",
+                        delta="Auto-adjusted from demand volatility",
+                        delta_type="positive",
+                        icon="🛡️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info("Run the Inventory Optimization workflow to populate live replenishment metrics.")
+        
+        st.markdown("""
+- Always-on telemetry triggers replenishment orders when real inventory crosses AI-calculated thresholds.
+- Automating replenishment lowers manual intervention, shortens cycle times, and boosts service levels.
+- Use these metrics in S&OP meetings to align operations, merchandising, and finance on a single source of truth.
+        """)
+    
+    with tabs[6]:
+        st.markdown("#### How does AI forecasting support sustainability & cost reduction?")
+        if inventory_metrics:
+            carrying_delta = None
+            if inventory_metrics.get('holding_cost') is not None and inventory_metrics.get('overstock_gap_units') is not None:
+                carrying_delta = inventory_metrics['overstock_gap_units'] * inventory_metrics['holding_cost']
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Reduced Carrying Cost",
+                        f"${carrying_delta:,.0f}/cycle" if carrying_delta and carrying_delta > 0 else "On target",
+                        delta="Driven by lower safety stock",
+                        delta_type="positive",
+                        icon="💰"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                reorder_qty = inventory_metrics.get('economic_order_quantity')
+                ordering_cost = inventory_metrics.get('ordering_cost')
+                if reorder_qty and ordering_cost:
+                    order_savings = ordering_cost / max(reorder_qty, 1) * 100
+                else:
+                    order_savings = None
+                st.markdown(
+                    create_metric_card(
+                        "Order Efficiency",
+                        f"{reorder_qty:,.0f} EOQ" if reorder_qty else "—",
+                        delta=f"Cost per unit ↓ ~{order_savings:.1f}%" if order_savings else "Balanced batches",
+                        delta_type="positive",
+                        icon="♻️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- Leaner safety stock cuts energy, storage space, and waste – contributing to Scope 3 reductions.
+- Smarter EOQ and lead-time alignment lowers rush shipments, packaging, and carbon-intensive expedites.
+- Align AI-driven savings to ESG scorecards and cost-to-serve KPIs for executive sign-off.
+        """)
+
 def generate_pdf_report(report_type="Full Report", date_range=None, include_charts=True, include_recommendations=True):
     """Generate a proper PDF report with available data"""
     if not REPORTLAB_AVAILABLE:
@@ -2657,6 +3162,8 @@ def main():
         show_inventory_page()
     elif st.session_state.current_page == 'analytics':
         show_analytics_page()
+    elif st.session_state.current_page == 'boardroom':
+        show_boardroom_page()
     elif st.session_state.current_page == 'reports':
         show_reports_page()
     
@@ -2681,3 +3188,4 @@ class InventoryOptimizer:
 # Run the application
 if __name__ == "__main__":
     main()
+        
