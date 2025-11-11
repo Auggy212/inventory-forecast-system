@@ -722,6 +722,61 @@ class DataProcessor:
         return None
     
     @staticmethod
+    def _robust_parse_dates(series):
+        """Attempt multiple strategies to parse dates and return best result"""
+        s = series.copy()
+        
+        # Trim whitespace if object dtype
+        if pd.api.types.is_object_dtype(s):
+            try:
+                s = s.astype(str).str.strip().replace({'': np.nan})
+            except Exception:
+                pass
+        
+        candidates = []
+        
+        # Strategy 1: default parser
+        try:
+            dt = pd.to_datetime(s, errors='coerce')
+            candidates.append(dt)
+        except Exception:
+            candidates.append(pd.Series([pd.NaT] * len(s)))
+        
+        # Strategy 2: dayfirst
+        try:
+            dt = pd.to_datetime(s, errors='coerce', dayfirst=True)
+            candidates.append(dt)
+        except Exception:
+            candidates.append(pd.Series([pd.NaT] * len(s)))
+        
+        # Strategy 3: common explicit formats
+        common_formats = ['%Y-%m-%d', '%d-%m-%Y', '%m-%d-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d']
+        for fmt in common_formats:
+            try:
+                dt = pd.to_datetime(s, errors='coerce', format=fmt)
+                candidates.append(dt)
+            except Exception:
+                candidates.append(pd.Series([pd.NaT] * len(s)))
+        
+        # Strategy 4: Excel serial numbers
+        try:
+            if pd.api.types.is_numeric_dtype(s) or (pd.api.types.is_object_dtype(s) and s.astype(str).str.replace('.', '', regex=False).str.isnumeric().mean() > 0.5):
+                numeric = pd.to_numeric(s, errors='coerce')
+                # Heuristic range for Excel serials
+                looks_like_excel = numeric.between(20000, 60000).mean() > 0.5
+                if looks_like_excel:
+                    base = pd.Timestamp('1899-12-30')
+                    dt = base + pd.to_timedelta(numeric, unit='D')
+                    candidates.append(dt)
+        except Exception:
+            candidates.append(pd.Series([pd.NaT] * len(s)))
+        
+        # Pick candidate with highest success rate
+        best = max(candidates, key=lambda x: x.notna().mean() if isinstance(x, pd.Series) else -1)
+        success_rate = best.notna().mean() if isinstance(best, pd.Series) else 0.0
+        return best, success_rate
+    
+    @staticmethod
     def load_data(uploaded_file, date_col=None, demand_col=None, inventory_col=None):
         """Load data from uploaded file with flexible column detection"""
         try:
@@ -764,12 +819,17 @@ class DataProcessor:
             
             # Convert and rename date column
             if date_col in df_processed.columns:
-                df_processed['date'] = pd.to_datetime(df_processed[date_col], errors='coerce')
-                # Drop rows where date conversion failed
+                parsed_dates, success = DataProcessor._robust_parse_dates(df_processed[date_col])
+                df_processed['date'] = parsed_dates
+                
+                # If still poor success, provide clearer guidance but keep trying a relaxed threshold
                 initial_len = len(df_processed)
                 df_processed = df_processed.dropna(subset=['date'])
-                if len(df_processed) < initial_len * 0.5:  # If we lost more than 50% of data
-                    return None, f"Too many rows failed date conversion. Please check your date column '{date_col}' format."
+                
+                # Require at least 80% success if there are enough rows, otherwise 50% for very small datasets
+                min_success = 0.8 if initial_len >= 30 else 0.5
+                if (len(df_processed) / max(initial_len, 1)) < min_success:
+                    return None, f"Too many rows failed date conversion. Detected column '{date_col}' contains mixed or unrecognized formats. Try selecting the correct date column or reformatting dates (e.g., YYYY-MM-DD)."
             else:
                 return None, f"Date column '{date_col}' not found in the data."
             
