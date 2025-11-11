@@ -72,11 +72,10 @@ st.markdown("""
         padding: 0;
         background: #f8fafc;
     }
-
+    
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-   
     
     /* Premium Header */
     .main-header {
