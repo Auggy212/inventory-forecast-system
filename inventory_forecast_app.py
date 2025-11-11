@@ -55,7 +55,7 @@ st.set_page_config(
     page_title="IntelliStock AI - Inventory Intelligence Platform",
     page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # Premium Custom CSS with animations and modern design
