@@ -77,6 +77,20 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     
+    /* Sidebar text color - white */
+    section[data-testid="stSidebar"] {
+        color: white !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: white !important;
+    }
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stMarkdown {
+        color: white !important;
+    }
+    
     /* Premium Header */
     .main-header {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -172,7 +186,7 @@ st.markdown("""
     .metric-value {
         font-size: 2rem;
         font-weight: 700;
-        color: #1a202c;
+        color: black;
         margin: 0.5rem 0;
     }
     
@@ -613,8 +627,7 @@ def configure_integration_settings():
                 st.caption("✅ Gemini client configured.")
             except Exception as e:
                 st.error(f"Gemini configuration failed: {str(e)}")
-        elif not GEMINI_AVAILABLE:
-            st.info("Install `google-generativeai` to enable Gemini features.")
+        # Removed install message - user can install package if needed
 
 def compute_backtest_metrics(df, model_name=None, test_window=None):
     """Run a hold-out backtest using the selected forecasting model."""
@@ -1241,7 +1254,7 @@ def show_upload_page():
     """Display the data upload page with flexible column detection"""
     st.markdown("""
     <div class="section-card">
-        <h2>📤 Upload Your Data</h2>
+        <h2 style="color: white;">📤 Upload Your Data</h2>
         <p style="color: #718096;">Import any inventory dataset - we'll automatically detect columns and formats</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1274,7 +1287,7 @@ def show_upload_page():
                 detected_inventory = DataProcessor.detect_inventory_column(preview_df, exclude_cols=[detected_date, detected_demand] if detected_date and detected_demand else [detected_date] if detected_date else [])
                 
                 # Show detected columns and allow manual override
-                st.markdown("### 🔍 Column Detection")
+                st.markdown('<h3 style="color: white;">🔍 Column Detection</h3>', unsafe_allow_html=True)
                 if detected_date or detected_demand:
                     detection_msg = "✅ Auto-detected columns: "
                     if detected_date:
@@ -1383,7 +1396,7 @@ def show_upload_page():
             data = st.session_state.data
             
             st.markdown("---")
-            st.markdown("### 📊 Data Overview")
+            st.markdown('<h3 style="color: white;">📊 Data Overview</h3>', unsafe_allow_html=True)
             
             # Data statistics
             col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
@@ -1401,7 +1414,7 @@ def show_upload_page():
                     st.metric("Total Value", f"{data['sales'].sum():,.0f}")
             
             # Show data preview
-            st.markdown("### 📋 Data Preview")
+            st.markdown('<h3 style="color: white;">📋 Data Preview</h3>', unsafe_allow_html=True)
             st.dataframe(
                 data.head(20).style.set_properties(**{
                     'background-color': '#f8fafc',
@@ -1414,7 +1427,7 @@ def show_upload_page():
             
             # Visualize the data if we have date and sales columns
             if 'date' in data.columns and 'sales' in data.columns:
-                st.markdown("### 📈 Trend Visualization")
+                st.markdown('<h3 style="color: white;">📈 Trend Visualization</h3>', unsafe_allow_html=True)
                 fig = px.line(
                     data,
                     x='date',
@@ -1450,7 +1463,7 @@ def show_upload_page():
     with col2:
         # Info card with updated requirements
         with st.container():
-            st.markdown("### 📋 Supported Formats")
+            st.markdown('<h3 style="color: white;">📋 Supported Formats</h3>', unsafe_allow_html=True)
             
             st.markdown("""
             **File Types:**
@@ -1478,7 +1491,7 @@ def show_upload_page():
         st.markdown("---")
         
         # Sample data download
-        st.markdown("### 📥 Sample Data")
+        st.markdown('<h3 style="color: white;">📥 Sample Data</h3>', unsafe_allow_html=True)
         
         sample_type = st.selectbox(
             "Sample Dataset Type",
