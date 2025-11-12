@@ -463,10 +463,49 @@ st.markdown("""
     }
     
     /* Streamlit Overrides */
-    /* Heading colors for readability on light backgrounds */
-    h1, h2, h3, h4, h5, h6 {
+    /* Targeted heading colors: dark headings on white cards, white headings on colored headers */
+
+    /* Headings that live in white/neutral cards and chart containers -> dark */
+    .section-card h1,
+    .section-card h2,
+    .section-card h3,
+    .section-card h4,
+    .chart-container .chart-title,
+    .chart-header .chart-title,
+    .info-card h4,
+    .feature-card h3,
+    div[data-testid="stMarkdownContainer"] .section-card h1,
+    div[data-testid="stMarkdownContainer"] .section-card h2,
+    div[data-testid="stMarkdownContainer"] .section-card h3 {
         color: #1a202c !important;
+        -webkit-text-fill-color: #1a202c !important;
+        font-weight: 700 !important;
+        opacity: 1 !important;
+        text-shadow: none !important;
     }
+
+    /* Headings that sit on the main gradient header / banner -> keep white */
+    .main-header .main-title,
+    .main-header h1,
+    .main-header h2,
+    .main-header h3,
+    .header-content h1,
+    .header-content .sub-title,
+    .model-selection-banner-title,
+    .model-selection-banner-subtitle {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        opacity: 1 !important;
+    }
+
+    /* Fallback: ensure any Streamlit-generated wrapper class headings are dark unless in main header */
+    html body .stApp [class*="css-"] h1,
+    html body .stApp [class*="css-"] h2,
+    html body .stApp [class*="css-"] h3 {
+        color: #1a202c !important;
+        -webkit-text-fill-color: #1a202c !important;
+    }
+
     /* Preserve white title on gradient header */
     .main-header .main-title, .main-header h1 {
         color: #ffffff !important;
@@ -550,9 +589,14 @@ st.markdown("""
         .custom-tabs {
             flex-wrap: wrap;
         }
+            
     }
+   
+            
+            
 </style>
 """, unsafe_allow_html=True)
+
 
 # Initialize session state with more structure
 if 'current_page' not in st.session_state:
@@ -2122,6 +2166,9 @@ def show_analytics_page():
     
     # Cost parameters input section
     st.markdown("### 💲 Cost Parameters")
+  
+
+
     st.info("💡 Enter your cost parameters to calculate accurate inventory costs based on your data.")
     
     cost_col1, cost_col2, cost_col3, cost_col4 = st.columns(4)
@@ -2506,29 +2553,69 @@ def show_analytics_page():
                 'description': 'Eliminate lost sales with better reorder timing'
             }
         ]
-    
     for opp in savings_opportunities:
-        impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
-        
-        st.markdown(f"""
-        <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
-                <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
-            </div>
-            <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
-            <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
-                <span style="background: #f3f4f6; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
-                    Difficulty: {opp['difficulty']}
-                </span>
-                <span style="background: {impact_color}22; color: {impact_color}; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
-                    Impact: {opp['impact']}
-                </span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    
+                impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
+
+            # Difficulty color-coding
+                diff = opp['difficulty'].lower()
+                if 'easy' in diff:
+                    diff_color = "#047857"      # green text
+                    diff_bg = "#d1fae5"         # soft green background
+                elif 'medium' in diff:
+                    diff_color = "#b45309"      # amber text
+                    diff_bg = "#fef3c7"         # pale amber background
+                elif 'hard' in diff:
+                    diff_color = "#b91c1c"      # red text
+                    diff_bg = "#fee2e2"         # light red background
+                else:
+                    diff_color = "#1a202c"      # fallback dark gray
+                    diff_bg = "#e5e7eb"         # neutral bg
+
+                st.markdown(f"""
+                <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
+                        <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
+                    </div>
+                    <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
+                    <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
+                        <span style="background: {diff_bg}; color: {diff_color}; padding: 0.25rem 0.75rem;
+                                    border-radius: 20px; font-size: 0.875rem; font-weight: 600;">
+                            Difficulty: {opp['difficulty']}
+                        </span>
+                        <span style="background: {impact_color}22; color: {impact_color};
+                                    padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;
+                                    font-weight: 600;">
+                            Impact: {opp['impact']}
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # for opp in savings_opportunities:
+    #     impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
+        
+    #     st.markdown(f"""
+    #     <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
+    #         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+    #             <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
+    #             <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
+    #         </div>
+    #         <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
+    #         <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
+    #             <span style="background: #f3f4f6; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
+    #                 Difficulty: {opp['difficulty']}
+    #             </span>
+    #             <span style="background: {impact_color}22; color: {impact_color}; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
+    #                 Impact: {opp['impact']}
+    #             </span>
+    #         </div>
+    #     </div>
+    #     """, unsafe_allow_html=True)
+    
+    # st.markdown("</div>", unsafe_allow_html=True)
 
 
 def show_boardroom_page():
@@ -3187,34 +3274,34 @@ def show_reports_page():
         
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Recent reports section
-    st.markdown("""
-    <div class="section-card">
-        <h3 style="margin-bottom: 1.5rem;">📋 Recent Reports</h3>
-    """, unsafe_allow_html=True)
+    # # Recent reports section
+    # st.markdown("""
+    # <div class="section-card">
+    #     <h3 style="margin-bottom: 1.5rem;">📋 Recent Reports</h3>
+    # """, unsafe_allow_html=True)
     
-    recent_reports = [
-        {'name': 'Monthly Executive Summary', 'date': '2024-01-15', 'size': '2.3 MB', 'type': 'PDF'},
-        {'name': 'Q4 Inventory Analysis', 'date': '2024-01-10', 'size': '1.8 MB', 'type': 'Excel'},
-        {'name': 'Forecast Accuracy Report', 'date': '2024-01-05', 'size': '1.2 MB', 'type': 'PDF'},
-    ]
+    # recent_reports = [
+    #     {'name': 'Monthly Executive Summary', 'date': '2024-01-15', 'size': '2.3 MB', 'type': 'PDF'},
+    #     {'name': 'Q4 Inventory Analysis', 'date': '2024-01-10', 'size': '1.8 MB', 'type': 'Excel'},
+    #     {'name': 'Forecast Accuracy Report', 'date': '2024-01-05', 'size': '1.2 MB', 'type': 'PDF'},
+    # ]
     
-    for report in recent_reports:
-        st.markdown(f"""
-        <div style="background: #f8fafc; padding: 1rem 1.5rem; border-radius: 10px; margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <div style="font-weight: 600; color: #1a202c;">{report['name']}</div>
-                <div style="font-size: 0.875rem; color: #718096; margin-top: 0.25rem;">
-                    {report['date']} • {report['size']} • {report['type']}
-                </div>
-            </div>
-            <button class="action-button" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
-                Download
-            </button>
-        </div>
-        """, unsafe_allow_html=True)
+    # for report in recent_reports:
+    #     st.markdown(f"""
+    #     <div style="background: #f8fafc; padding: 1rem 1.5rem; border-radius: 10px; margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+    #         <div>
+    #             <div style="font-weight: 600; color: #1a202c;">{report['name']}</div>
+    #             <div style="font-size: 0.875rem; color: #718096; margin-top: 0.25rem;">
+    #                 {report['date']} • {report['size']} • {report['type']}
+    #             </div>
+    #         </div>
+    #         <button class="action-button" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
+    #             Download
+    #         </button>
+    #     </div>
+    #     """, unsafe_allow_html=True)
     
-    st.markdown("</div>", unsafe_allow_html=True)
+    # st.markdown("</div>", unsafe_allow_html=True)
 
 # Main application logic
 def main():
