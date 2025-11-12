@@ -9,11 +9,13 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+import calendar
 import warnings
 warnings.filterwarnings('ignore')
 
 # Import forecasting libraries
 from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from prophet import Prophet
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
@@ -25,6 +27,17 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 from PIL import Image
 import time
+from math import sqrt
+import importlib
+
+# Optional Gemini integration
+genai_spec = importlib.util.find_spec("google.generativeai")
+if genai_spec is not None:
+    genai = importlib.import_module("google.generativeai")
+    GEMINI_AVAILABLE = True
+else:
+    genai = None
+    GEMINI_AVAILABLE = False
 
 # PDF generation imports
 try:
@@ -42,7 +55,7 @@ st.set_page_config(
     page_title="IntelliStock AI - Inventory Intelligence Platform",
     page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # Premium Custom CSS with animations and modern design
@@ -63,7 +76,20 @@ st.markdown("""
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    
+    /* Sidebar text color - white */
+    section[data-testid="stSidebar"] {
+        color: white !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: white !important;
+    }
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stMarkdown {
+        color: white !important;
+    }
     
     /* Premium Header */
     .main-header {
@@ -160,7 +186,7 @@ st.markdown("""
     .metric-value {
         font-size: 2rem;
         font-weight: 700;
-        color: #1a202c;
+        color: black;
         margin: 0.5rem 0;
     }
     
@@ -437,10 +463,49 @@ st.markdown("""
     }
     
     /* Streamlit Overrides */
-    /* Heading colors for readability on light backgrounds */
-    h1, h2, h3, h4, h5, h6 {
+    /* Targeted heading colors: dark headings on white cards, white headings on colored headers */
+
+    /* Headings that live in white/neutral cards and chart containers -> dark */
+    .section-card h1,
+    .section-card h2,
+    .section-card h3,
+    .section-card h4,
+    .chart-container .chart-title,
+    .chart-header .chart-title,
+    .info-card h4,
+    .feature-card h3,
+    div[data-testid="stMarkdownContainer"] .section-card h1,
+    div[data-testid="stMarkdownContainer"] .section-card h2,
+    div[data-testid="stMarkdownContainer"] .section-card h3 {
         color: #1a202c !important;
+        -webkit-text-fill-color: #1a202c !important;
+        font-weight: 700 !important;
+        opacity: 1 !important;
+        text-shadow: none !important;
     }
+
+    /* Headings that sit on the main gradient header / banner -> keep white */
+    .main-header .main-title,
+    .main-header h1,
+    .main-header h2,
+    .main-header h3,
+    .header-content h1,
+    .header-content .sub-title,
+    .model-selection-banner-title,
+    .model-selection-banner-subtitle {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        opacity: 1 !important;
+    }
+
+    /* Fallback: ensure any Streamlit-generated wrapper class headings are dark unless in main header */
+    html body .stApp [class*="css-"] h1,
+    html body .stApp [class*="css-"] h2,
+    html body .stApp [class*="css-"] h3 {
+        color: #1a202c !important;
+        -webkit-text-fill-color: #1a202c !important;
+    }
+
     /* Preserve white title on gradient header */
     .main-header .main-title, .main-header h1 {
         color: #ffffff !important;
@@ -524,9 +589,14 @@ st.markdown("""
         .custom-tabs {
             flex-wrap: wrap;
         }
+            
     }
+   
+            
+            
 </style>
 """, unsafe_allow_html=True)
+
 
 # Initialize session state with more structure
 if 'current_page' not in st.session_state:
@@ -541,6 +611,12 @@ if 'analysis_complete' not in st.session_state:
     st.session_state.analysis_complete = False
 if 'selected_model' not in st.session_state:
     st.session_state.selected_model = None
+if 'gemini_api_key' not in st.session_state:
+    st.session_state.gemini_api_key = ""
+if 'forecast_metrics' not in st.session_state:
+    st.session_state.forecast_metrics = None
+if 'backtest_metrics' not in st.session_state:
+    st.session_state.backtest_metrics = None
 
 # Utility functions for UI components
 def create_metric_card(label, value, delta=None, delta_type="positive", icon="📊"):
@@ -574,6 +650,127 @@ def create_feature_card(title, description, icon, action_text="Explore"):
     </div>
     """
 
+def configure_integration_settings():
+    """Sidebar configuration for API keys and integrations."""
+    with st.sidebar:
+        st.markdown("### 🔐 Integration Settings")
+        st.markdown("Provide your Gemini API key to activate GenAI-powered insights. Keys are stored in-memory for this session only.")
+        api_key = st.text_input(
+            "Gemini API Key",
+            value=st.session_state.get('gemini_api_key', ""),
+            type="password",
+            help="Paste your Google Gemini (free tier) API key. It will not be persisted."
+        )
+        if api_key != st.session_state.get('gemini_api_key', ""):
+            st.session_state.gemini_api_key = api_key.strip()
+            st.success("API key updated for this session.")
+        
+        if GEMINI_AVAILABLE and st.session_state.gemini_api_key:
+            try:
+                genai.configure(api_key=st.session_state.gemini_api_key)
+                st.caption("✅ Gemini client configured.")
+            except Exception as e:
+                st.error(f"Gemini configuration failed: {str(e)}")
+        # Removed install message - user can install package if needed
+
+def compute_backtest_metrics(df, model_name=None, test_window=None):
+    """Run a hold-out backtest using the selected forecasting model."""
+    if df is None or 'sales' not in df.columns or len(df) < 30:
+        return None
+    
+    selected_model = model_name or st.session_state.get('selected_model') or 'Prophet'
+    cached = st.session_state.get('backtest_metrics')
+    if cached and cached.get('model') == selected_model:
+        if not test_window or cached.get('test_days') == test_window:
+            return cached
+    
+    try:
+        forecaster = DemandForecaster(df)
+        metrics = forecaster.backtest(model_name=selected_model, test_window=test_window)
+        st.session_state.backtest_metrics = metrics
+        return metrics
+    except Exception as exc:
+        st.warning(f"Backtest unavailable: {exc}")
+        return None
+
+def analyze_inventory_challenges(df, inventory_col=None, inventory_metrics=None):
+    """Derive headline inventory risks and opportunities"""
+    insights = {
+        'overstock_days': None,
+        'stockout_days': None,
+        'seasonality_peak': None,
+        'seasonality_trough': None,
+        'demand_volatility': None,
+        'current_gap': None
+    }
+    
+    if df is None or 'sales' not in df.columns:
+        return insights
+    
+    data = df.copy()
+    data = data.sort_values('date')
+    
+    if inventory_col and inventory_col in data.columns:
+        inventory_series = pd.to_numeric(data[inventory_col], errors='coerce').fillna(0)
+        demand_series = data['sales']
+        insights['stockout_days'] = int((inventory_series <= demand_series * 0.1).sum())
+        insights['overstock_days'] = int((inventory_series >= demand_series * 2).sum())
+    elif inventory_metrics and inventory_metrics.get('reorder_point') is not None:
+        current_inventory = inventory_metrics.get('current_inventory', 0)
+        reorder_point = inventory_metrics.get('reorder_point', 0)
+        recommended_max = inventory_metrics.get('recommended_max_inventory', reorder_point * 1.4)
+        insights['current_gap'] = current_inventory - reorder_point
+        if current_inventory > recommended_max:
+            insights['overstock_days'] = max(int((current_inventory - recommended_max) / max(inventory_metrics.get('avg_daily_demand', 1), 1)), 0)
+        if current_inventory < reorder_point:
+            insights['stockout_days'] = max(int(abs(current_inventory - reorder_point) / max(inventory_metrics.get('avg_daily_demand', 1), 1)), 0)
+    
+    data['month'] = data['date'].dt.month
+    monthly = data.groupby('month')['sales'].mean()
+    if len(monthly) >= 2:
+        peak_month = monthly.idxmax()
+        trough_month = monthly.idxmin()
+        insights['seasonality_peak'] = peak_month
+        insights['seasonality_trough'] = trough_month
+    
+    if data['sales'].mean() > 0:
+        insights['demand_volatility'] = float(data['sales'].std() / data['sales'].mean() * 100)
+    
+    return insights
+
+def evaluate_data_sources(df, column_mapping):
+    """Summarize availability of recommended data assets"""
+    sources = []
+    available_cols = set(df.columns) if df is not None else set()
+    inventory_col = column_mapping.get('inventory') if column_mapping else None
+    
+    sources.append({
+        'name': 'Historical Sales',
+        'status': 'Available ✅' if 'sales' in available_cols else 'Missing ⚠️',
+        'detail': 'Daily transaction history used to train forecasting models.'
+    })
+    sources.append({
+        'name': 'Inventory Positions',
+        'status': 'Available ✅' if inventory_col and inventory_col in available_cols else 'Optional',
+        'detail': 'On-hand and on-order balances to detect stockouts and overstock risk.'
+    })
+    
+    promo_cols = [c for c in available_cols if 'promo' in c.lower() or 'campaign' in c.lower()]
+    sources.append({
+        'name': 'Promotions & Price Events',
+        'status': 'Available ✅' if promo_cols else 'Recommended',
+        'detail': 'Marketing levers that impact demand uplift.'
+    })
+    
+    external_cols = [c for c in available_cols if any(keyword in c.lower() for keyword in ['weather', 'google', 'macro', 'holiday'])]
+    sources.append({
+        'name': 'External Drivers',
+        'status': 'Available ✅' if external_cols else 'Recommended',
+        'detail': 'Signals such as holidays, weather, or macro trends to boost accuracy.'
+    })
+    
+    return sources
+
 def show_loading_animation(text="Processing..."):
     """Show a premium loading animation"""
     return st.markdown(f"""
@@ -606,6 +803,7 @@ def show_navigation():
         'forecast': {'label': '📊 Forecasting', 'key': 'forecast'},
         'inventory': {'label': '📦 Inventory', 'key': 'inventory'},
         'analytics': {'label': '💰 Analytics', 'key': 'analytics'},
+        'boardroom': {'label': '🏢 Boardroom', 'key': 'boardroom'},
         'reports': {'label': '📑 Reports', 'key': 'reports'}
     }
     
@@ -1015,12 +1213,21 @@ def show_home_page():
         
         with col1:
             avg_sales = st.session_state.data['sales'].mean()
+            recent_mean = st.session_state.data['sales'].tail(7).mean()
+            prev_mean = st.session_state.data['sales'].iloc[-14:-7].mean() if len(st.session_state.data) >= 14 else None
+            if prev_mean is not None and pd.notna(prev_mean) and prev_mean > 0:
+                avg_delta_pct = (recent_mean - prev_mean) / prev_mean * 100
+                avg_delta = f"{abs(avg_delta_pct):.1f}% vs prior 7 days"
+                avg_delta_type = "positive" if avg_delta_pct >= 0 else "negative"
+            else:
+                avg_delta = None
+                avg_delta_type = "positive"
             st.markdown(
                 create_metric_card(
                     "Average Daily Sales",
                     f"{avg_sales:,.0f}",
-                    "+12.5%",
-                    "positive",
+                    avg_delta,
+                    avg_delta_type,
                     "📊"
                 ),
                 unsafe_allow_html=True
@@ -1028,12 +1235,25 @@ def show_home_page():
         
         with col2:
             total_sales = st.session_state.data['sales'].sum()
+            if len(st.session_state.data) >= 60:
+                recent_total = st.session_state.data.tail(30)['sales'].sum()
+                prev_total = st.session_state.data.iloc[-60:-30]['sales'].sum()
+                if pd.notna(prev_total) and prev_total > 0:
+                    total_delta_pct = (recent_total - prev_total) / prev_total * 100
+                    total_delta = f"{abs(total_delta_pct):.1f}% last 30 days"
+                    total_delta_type = "positive" if total_delta_pct >= 0 else "negative"
+                else:
+                    total_delta = None
+                    total_delta_type = "positive"
+            else:
+                total_delta = None
+                total_delta_type = "positive"
             st.markdown(
                 create_metric_card(
                     "Total Sales",
                     f"{total_sales:,.0f}",
-                    "+8.3%",
-                    "positive",
+                    total_delta,
+                    total_delta_type,
                     "💰"
                 ),
                 unsafe_allow_html=True
@@ -1053,13 +1273,22 @@ def show_home_page():
             )
         
         with col4:
-            trend = "📈" if st.session_state.data['sales'].iloc[-7:].mean() > avg_sales else "📉"
+            if len(st.session_state.data) >= 14:
+                recent_avg = st.session_state.data['sales'].tail(7).mean()
+                previous_avg = st.session_state.data['sales'].iloc[-14:-7].mean()
+                trend_delta_pct = ((recent_avg - previous_avg) / previous_avg * 100) if previous_avg is not None and pd.notna(previous_avg) and previous_avg > 0 else 0
+            else:
+                recent_avg = st.session_state.data['sales'].tail(7).mean()
+                previous_avg = avg_sales
+                trend_delta_pct = ((recent_avg - previous_avg) / previous_avg * 100) if previous_avg is not None and pd.notna(previous_avg) and previous_avg > 0 else 0
+            trend_icon = "📈" if trend_delta_pct >= 0 else "📉"
+            trend_strength = f"{abs(trend_delta_pct):.1f}% change"
             st.markdown(
                 create_metric_card(
                     "Current Trend",
-                    trend,
-                    "Strong",
-                    "positive" if trend == "📈" else "negative",
+                    trend_icon,
+                    trend_strength,
+                    "positive" if trend_delta_pct >= 0 else "negative",
                     "📊"
                 ),
                 unsafe_allow_html=True
@@ -1069,7 +1298,7 @@ def show_upload_page():
     """Display the data upload page with flexible column detection"""
     st.markdown("""
     <div class="section-card">
-        <h2>📤 Upload Your Data</h2>
+        <h2 style="color: white;">📤 Upload Your Data</h2>
         <p style="color: #718096;">Import any inventory dataset - we'll automatically detect columns and formats</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1102,7 +1331,7 @@ def show_upload_page():
                 detected_inventory = DataProcessor.detect_inventory_column(preview_df, exclude_cols=[detected_date, detected_demand] if detected_date and detected_demand else [detected_date] if detected_date else [])
                 
                 # Show detected columns and allow manual override
-                st.markdown("### 🔍 Column Detection")
+                st.markdown('<h3 style="color: white;">🔍 Column Detection</h3>', unsafe_allow_html=True)
                 if detected_date or detected_demand:
                     detection_msg = "✅ Auto-detected columns: "
                     if detected_date:
@@ -1181,6 +1410,11 @@ def show_upload_page():
                         else:
                             st.session_state.data = data
                             st.success("✅ Data uploaded and processed successfully!")
+                            st.session_state.forecast_results = None
+                            st.session_state.forecast_metrics = None
+                            st.session_state.backtest_metrics = None
+                            st.session_state.inventory_recommendations = None
+                            st.session_state.analysis_complete = False
                             
                             # Show column mapping info
                             if 'column_mapping' in st.session_state:
@@ -1206,7 +1440,7 @@ def show_upload_page():
             data = st.session_state.data
             
             st.markdown("---")
-            st.markdown("### 📊 Data Overview")
+            st.markdown('<h3 style="color: white;">📊 Data Overview</h3>', unsafe_allow_html=True)
             
             # Data statistics
             col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
@@ -1224,7 +1458,7 @@ def show_upload_page():
                     st.metric("Total Value", f"{data['sales'].sum():,.0f}")
             
             # Show data preview
-            st.markdown("### 📋 Data Preview")
+            st.markdown('<h3 style="color: white;">📋 Data Preview</h3>', unsafe_allow_html=True)
             st.dataframe(
                 data.head(20).style.set_properties(**{
                     'background-color': '#f8fafc',
@@ -1237,7 +1471,7 @@ def show_upload_page():
             
             # Visualize the data if we have date and sales columns
             if 'date' in data.columns and 'sales' in data.columns:
-                st.markdown("### 📈 Trend Visualization")
+                st.markdown('<h3 style="color: white;">📈 Trend Visualization</h3>', unsafe_allow_html=True)
                 fig = px.line(
                     data,
                     x='date',
@@ -1273,7 +1507,7 @@ def show_upload_page():
     with col2:
         # Info card with updated requirements
         with st.container():
-            st.markdown("### 📋 Supported Formats")
+            st.markdown('<h3 style="color: white;">📋 Supported Formats</h3>', unsafe_allow_html=True)
             
             st.markdown("""
             **File Types:**
@@ -1301,7 +1535,7 @@ def show_upload_page():
         st.markdown("---")
         
         # Sample data download
-        st.markdown("### 📥 Sample Data")
+        st.markdown('<h3 style="color: white;">📥 Sample Data</h3>', unsafe_allow_html=True)
         
         sample_type = st.selectbox(
             "Sample Dataset Type",
@@ -1446,178 +1680,191 @@ def show_forecast_page():
         if st.session_state.selected_model is None:
             st.warning("⚠️ Please select a forecasting model first!")
         else:
-            with st.spinner(f"Running {st.session_state.selected_model} model - analyzing your data..."):
-                # Add progress bar
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+            try:
+                with st.spinner(f"Running {st.session_state.selected_model} model - analyzing your data..."):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    status_text.text(f"Initializing {st.session_state.selected_model} model...")
+                    for i in range(30):
+                        progress_bar.progress(i + 1)
+                        time.sleep(0.01)
+                    
+                    status_text.text(f"Training {st.session_state.selected_model} model...")
+                    for i in range(30, 70):
+                        progress_bar.progress(i + 1)
+                        time.sleep(0.01)
+                    
+                    status_text.text(f"Generating forecasts with {st.session_state.selected_model}...")
+                    for i in range(70, 100):
+                        progress_bar.progress(i + 1)
+                        time.sleep(0.005)
+                    
+                    status_text.empty()
+                    progress_bar.empty()
+                    
+                    forecaster = DemandForecaster(st.session_state.data)
+                    forecast_output = forecaster.forecast(
+                        model_name=st.session_state.selected_model,
+                        horizon=forecast_horizon,
+                        confidence_level=confidence_level,
+                        include_seasonality=include_seasonality,
+                        include_holidays=include_holidays
+                    )
                 
-                # Simulate progress with status updates
-                status_text.text(f"Initializing {st.session_state.selected_model} model...")
-                for i in range(30):
-                    progress_bar.progress(i + 1)
-                    time.sleep(0.02)
-                
-                status_text.text(f"Training {st.session_state.selected_model} model...")
-                for i in range(30, 70):
-                    progress_bar.progress(i + 1)
-                    time.sleep(0.02)
-                
-                status_text.text(f"Generating forecasts with {st.session_state.selected_model}...")
-                for i in range(70, 100):
-                    progress_bar.progress(i + 1)
-                    time.sleep(0.01)
-                
-                progress_bar.empty()
-                status_text.empty()
-            
-            # Here you would run the actual forecasting
-            st.success(f"✅ Forecasting completed successfully using {st.session_state.selected_model}!")
+                st.session_state.forecast_results = forecast_output.get('forecast')
+                st.session_state.forecast_metrics = forecast_output.get('metrics')
+                st.session_state.backtest_metrics = forecast_output.get('backtest')
+                st.session_state.forecast_config = {
+                    'horizon': forecast_horizon,
+                    'confidence_level': confidence_level,
+                    'include_seasonality': include_seasonality,
+                    'include_holidays': include_holidays,
+                    'model': st.session_state.selected_model
+                }
+                st.session_state.analysis_complete = True
+                st.success(f"✅ Forecasting completed successfully using {st.session_state.selected_model}!")
+            except Exception as err:
+                st.error(f"Forecasting failed: {err}")
+                st.stop()
 
-            # Show results in beautiful cards
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # Create sample forecast results for demonstration
-            # (In real implementation, this would come from the forecasting models)
-            forecast_data = pd.DataFrame({
-                'date': pd.date_range(st.session_state.data['date'].max() + timedelta(days=1), periods=forecast_horizon, freq='D'),
-                'forecast': np.random.normal(st.session_state.data['sales'].mean(), st.session_state.data['sales'].std() * 0.8, forecast_horizon),
-                'lower_bound': np.random.normal(st.session_state.data['sales'].mean() * 0.9, st.session_state.data['sales'].std() * 0.8, forecast_horizon),
-                'upper_bound': np.random.normal(st.session_state.data['sales'].mean() * 1.1, st.session_state.data['sales'].std() * 0.8, forecast_horizon),
-                'method': st.session_state.selected_model
-            })
-            
-            # Store forecast results in session state for PDF generation
-            st.session_state.forecast_results = forecast_data
-            
-            # Create beautiful forecast visualization
-            fig = go.Figure()
-            
-            # Historical data
+    forecast_data = st.session_state.get('forecast_results')
+    forecast_metrics = st.session_state.get('forecast_metrics')
+    
+    if forecast_data is not None and forecast_metrics is not None:
+        if not isinstance(forecast_data, pd.DataFrame):
+            forecast_df = pd.DataFrame(forecast_data)
+        else:
+            forecast_df = forecast_data.copy()
+        
+        if 'date' in forecast_df.columns:
+            forecast_df['date'] = pd.to_datetime(forecast_df['date'])
+        forecast_df = forecast_df.sort_values('date')
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=st.session_state.data['date'],
+            y=st.session_state.data['sales'],
+            name='Historical',
+            line=dict(color='#4a5568', width=2),
+            mode='lines'
+        ))
+        fig.add_trace(go.Scatter(
+            x=forecast_df['date'],
+            y=forecast_df['forecast'],
+            name='Forecast',
+            line=dict(color='#667eea', width=3),
+            mode='lines+markers',
+            marker=dict(size=4)
+        ))
+        if {'lower_bound', 'upper_bound'}.issubset(forecast_df.columns):
             fig.add_trace(go.Scatter(
-                x=st.session_state.data['date'],
-                y=st.session_state.data['sales'],
-                name='Historical',
-                line=dict(color='#4a5568', width=2),
-                mode='lines'
-            ))
-            
-            # Forecast
-            fig.add_trace(go.Scatter(
-                x=forecast_data['date'],
-                y=forecast_data['forecast'],
-                name='Forecast',
-                line=dict(color='#667eea', width=3),
-                mode='lines+markers',
-                marker=dict(size=4)
-            ))
-            
-            # Confidence interval
-            fig.add_trace(go.Scatter(
-                x=forecast_data['date'].tolist() + forecast_data['date'].tolist()[::-1],
-                y=forecast_data['upper_bound'].tolist() + forecast_data['lower_bound'].tolist()[::-1],
+                x=forecast_df['date'].tolist() + forecast_df['date'].tolist()[::-1],
+                y=forecast_df['upper_bound'].tolist() + forecast_df['lower_bound'].tolist()[::-1],
                 fill='toself',
                 fillcolor='rgba(102, 126, 234, 0.1)',
                 line=dict(color='rgba(255,255,255,0)'),
                 showlegend=False,
                 name='Confidence'
             ))
-            
-            fig.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                xaxis=dict(
-                    showgrid=True,
-                    gridwidth=1,
-                    gridcolor='rgba(0,0,0,0.05)',
-                    title=''
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridwidth=1,
-                    gridcolor='rgba(0,0,0,0.05)',
-                    title='Sales'
-                ),
-                margin=dict(l=0, r=0, t=30, b=0),
-                hovermode='x unified',
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                )
+        
+        fig.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(0,0,0,0.05)',
+                title=''
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(0,0,0,0.05)',
+                title='Sales'
+            ),
+            margin=dict(l=0, r=0, t=30, b=0),
+            hovermode='x unified',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
             )
-            
-            # Display which model was used
-            if st.session_state.selected_model:
-                st.markdown(f"""
-                <div class="info-card" style="margin-bottom: 1.5rem;">
-                    <h4>🤖 Model Used: {st.session_state.selected_model}</h4>
-                    <p>This forecast was generated using the <strong>{st.session_state.selected_model}</strong> forecasting model. {models[st.session_state.selected_model]['full_desc']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("""
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">AI-Powered Demand Forecast</div>
-                </div>
+        )
+        
+        if st.session_state.selected_model:
+            st.markdown(f"""
+            <div class="info-card" style="margin-bottom: 1.5rem;">
+                <h4>🤖 Model Used: {st.session_state.selected_model}</h4>
+                <p>This forecast leverages <strong>{st.session_state.selected_model}</strong>. {models[st.session_state.selected_model]['full_desc']}</p>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Forecast metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                model_icon = models.get(st.session_state.selected_model, {}).get('icon', '🎯') if st.session_state.selected_model else '🎯'
-                st.markdown(
-                    create_metric_card(
-                        "Forecast Model",
-                        st.session_state.selected_model if st.session_state.selected_model else "N/A",
-                        "Active",
-                        "positive",
-                        model_icon
-                    ),
-                    unsafe_allow_html=True
-                )
-            
-            with col2:
-                st.markdown(
-                    create_metric_card(
-                        "Forecast Accuracy",
-                        "94.5%",
-                        "+2.3%",
-                        "positive",
-                        "🎯"
-                    ),
-                    unsafe_allow_html=True
-                )
-            
-            with col3:
-                st.markdown(
-                    create_metric_card(
-                        "Avg. Predicted",
-                        f"{forecast_data['forecast'].mean():,.0f}",
-                        "+5.2%",
-                        "positive",
-                        "📈"
-                    ),
-                    unsafe_allow_html=True
-                )
-            
-            with col4:
-                st.markdown(
-                    create_metric_card(
-                        "Peak Demand",
-                        f"{forecast_data['forecast'].max():,.0f}",
-                        "Thursday",
-                        "positive",
-                        "🔝"
-                    ),
-                    unsafe_allow_html=True
-                )
+        
+        st.markdown("""
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">AI-Powered Demand Forecast</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            model_icon = models.get(st.session_state.selected_model, {}).get('icon', '🎯') if st.session_state.selected_model else '🎯'
+            st.markdown(
+                create_metric_card(
+                    "Forecast Model",
+                    st.session_state.selected_model if st.session_state.selected_model else "N/A",
+                    delta=f"Horizon: {st.session_state.get('forecast_config', {}).get('horizon', len(forecast_df))} days",
+                    delta_type="positive",
+                    icon=model_icon
+                ),
+                unsafe_allow_html=True
+            )
+        with col2:
+            mape_delta = f"{forecast_metrics.get('mape_improvement', 0):.1f} pts vs naive" if forecast_metrics.get('mape_improvement') is not None else None
+            mape_delta_type = "positive" if forecast_metrics.get('mape_improvement', 0) >= 0 else "negative"
+            st.markdown(
+                create_metric_card(
+                    "MAPE",
+                    f"{forecast_metrics.get('ai_mape', 0):.1f}%",
+                    delta=mape_delta,
+                    delta_type=mape_delta_type,
+                    icon="🎯"
+                ),
+                unsafe_allow_html=True
+            )
+        with col3:
+            wape_delta = f"{forecast_metrics.get('wape_improvement', 0):.1f} pts vs naive" if forecast_metrics.get('wape_improvement') is not None else None
+            wape_delta_type = "positive" if forecast_metrics.get('wape_improvement', 0) >= 0 else "negative"
+            st.markdown(
+                create_metric_card(
+                    "WAPE",
+                    f"{forecast_metrics.get('ai_wape', 0):.1f}%",
+                    delta=wape_delta,
+                    delta_type=wape_delta_type,
+                    icon="📉"
+                ),
+                unsafe_allow_html=True
+            )
+        with col4:
+            peak_idx = forecast_df['forecast'].idxmax()
+            peak_date = forecast_df.loc[peak_idx, 'date'] if peak_idx is not None else None
+            peak_text = peak_date.strftime('%A') if isinstance(peak_date, pd.Timestamp) else "—"
+            st.markdown(
+                create_metric_card(
+                    "Peak Demand",
+                    f"{forecast_df['forecast'].max():,.0f}",
+                    delta=peak_text,
+                    delta_type="positive",
+                    icon="🔝"
+                ),
+                unsafe_allow_html=True
+            )
 
 def show_inventory_page():
     """Display the inventory optimization page"""
@@ -1732,6 +1979,30 @@ def show_inventory_page():
             
             # Economic Order Quantity
             eoq = np.sqrt((2 * avg_demand * ordering_cost) / holding_cost)
+            
+            recommended_max_inventory = reorder_point + safety_stock
+            stockout_risk = 0.0
+            if reorder_point > 0:
+                stockout_risk = max((reorder_point - current_inventory) / reorder_point * 100, 0)
+            overstock_gap_units = max(current_inventory - recommended_max_inventory, 0)
+            days_of_stock = current_inventory / avg_demand if avg_demand > 0 else None
+            
+            st.session_state.inventory_recommendations = {
+                'avg_daily_demand': float(avg_demand),
+                'safety_stock': float(safety_stock),
+                'reorder_point': float(reorder_point),
+                'economic_order_quantity': float(eoq),
+                'current_inventory': float(current_inventory),
+                'recommended_max_inventory': float(recommended_max_inventory),
+                'stockout_risk': float(stockout_risk),
+                'overstock_gap_units': float(overstock_gap_units),
+                'service_level': float(service_level * 100),
+                'lead_time': int(lead_time),
+                'holding_cost': float(holding_cost),
+                'ordering_cost': float(ordering_cost),
+                'stockout_cost': float(stockout_cost),
+                'days_of_stock': float(days_of_stock) if days_of_stock is not None else None
+            }
             
             st.success("✅ Optimization complete!")
             
@@ -1895,6 +2166,9 @@ def show_analytics_page():
     
     # Cost parameters input section
     st.markdown("### 💲 Cost Parameters")
+  
+
+
     st.info("💡 Enter your cost parameters to calculate accurate inventory costs based on your data.")
     
     cost_col1, cost_col2, cost_col3, cost_col4 = st.columns(4)
@@ -2279,29 +2553,420 @@ def show_analytics_page():
                 'description': 'Eliminate lost sales with better reorder timing'
             }
         ]
-    
     for opp in savings_opportunities:
-        impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
-        
-        st.markdown(f"""
-        <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
-                <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
-            </div>
-            <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
-            <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
-                <span style="background: #f3f4f6; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
-                    Difficulty: {opp['difficulty']}
-                </span>
-                <span style="background: {impact_color}22; color: {impact_color}; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
-                    Impact: {opp['impact']}
-                </span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    
+                impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
+
+            # Difficulty color-coding
+                diff = opp['difficulty'].lower()
+                if 'easy' in diff:
+                    diff_color = "#047857"      # green text
+                    diff_bg = "#d1fae5"         # soft green background
+                elif 'medium' in diff:
+                    diff_color = "#b45309"      # amber text
+                    diff_bg = "#fef3c7"         # pale amber background
+                elif 'hard' in diff:
+                    diff_color = "#b91c1c"      # red text
+                    diff_bg = "#fee2e2"         # light red background
+                else:
+                    diff_color = "#1a202c"      # fallback dark gray
+                    diff_bg = "#e5e7eb"         # neutral bg
+
+                st.markdown(f"""
+                <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
+                        <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
+                    </div>
+                    <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
+                    <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
+                        <span style="background: {diff_bg}; color: {diff_color}; padding: 0.25rem 0.75rem;
+                                    border-radius: 20px; font-size: 0.875rem; font-weight: 600;">
+                            Difficulty: {opp['difficulty']}
+                        </span>
+                        <span style="background: {impact_color}22; color: {impact_color};
+                                    padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;
+                                    font-weight: 600;">
+                            Impact: {opp['impact']}
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # for opp in savings_opportunities:
+    #     impact_color = {'High': '#10b981', 'Medium': '#f59e0b', 'Low': '#ef4444'}[opp['impact']]
+        
+    #     st.markdown(f"""
+    #     <div style="background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 1rem; border-left: 4px solid {impact_color};">
+    #         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+    #             <h4 style="margin: 0; color: #1a202c;">{opp['title']}</h4>
+    #             <span style="font-size: 1.25rem; font-weight: 700; color: #10b981;">{opp['savings']}</span>
+    #         </div>
+    #         <p style="color: #718096; margin: 0.5rem 0;">{opp['description']}</p>
+    #         <div style="display: flex; gap: 1rem; margin-top: 0.75rem;">
+    #             <span style="background: #f3f4f6; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
+    #                 Difficulty: {opp['difficulty']}
+    #             </span>
+    #             <span style="background: {impact_color}22; color: {impact_color}; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
+    #                 Impact: {opp['impact']}
+    #             </span>
+    #         </div>
+    #     </div>
+    #     """, unsafe_allow_html=True)
+    
+    # st.markdown("</div>", unsafe_allow_html=True)
+
+
+def show_boardroom_page():
+    """Display an executive-ready dashboard answering key boardroom questions"""
+    st.markdown("""
+    <div class="section-card">
+        <h2>🏢 Boardroom Command Center</h2>
+        <p style="color: #718096;">
+            Executive-level storyline that maps AI capabilities to your supply chain strategy. Each tab aligns to the questions we must answer for the C-suite.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    data = st.session_state.data
+    column_mapping = st.session_state.get('column_mapping', {})
+    inventory_metrics = st.session_state.inventory_recommendations
+    inventory_col = column_mapping.get('inventory') if column_mapping else None
+    
+    if data is None:
+        st.info("Upload data first on the Data Upload page to activate the Boardroom insights.")
+        return
+    
+    backtest_metrics = compute_backtest_metrics(data)
+    challenge_insights = analyze_inventory_challenges(
+        data,
+        inventory_col=inventory_col,
+        inventory_metrics=inventory_metrics
+    )
+    data_sources = evaluate_data_sources(data, column_mapping)
+    
+    tabs = st.tabs([
+        "Inventory Challenges",
+        "Predictive Accuracy",
+        "Critical Data Sources",
+        "Best-Fit AI Techniques",
+        "MAPE & WAPE",
+        "Real-time Visibility",
+        "Sustainability & Cost"
+    ])
+    
+    with tabs[0]:
+        st.markdown("#### What inventory challenges can AI solve?")
+        
+        overstock_value = (
+            f"{challenge_insights['overstock_days']} days"
+            if challenge_insights['overstock_days'] is not None else "Monitor"
+        )
+        stockout_value = (
+            f"{challenge_insights['stockout_days']} days"
+            if challenge_insights['stockout_days'] is not None else "Monitor"
+        )
+        volatility_value = (
+            f"{challenge_insights['demand_volatility']:.1f}%"
+            if challenge_insights['demand_volatility'] is not None else "—"
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            delta = None
+            delta_type = "positive"
+            if inventory_metrics and inventory_metrics.get('stockout_risk') is not None:
+                delta = f"{inventory_metrics['stockout_risk']:.1f}% risk"
+                delta_type = "negative" if inventory_metrics['stockout_risk'] > 15 else "positive"
+            st.markdown(
+                create_metric_card(
+                    "Stockout Signals",
+                    stockout_value,
+                    delta=delta,
+                    delta_type=delta_type,
+                    icon="🚨"
+                ),
+                unsafe_allow_html=True
+            )
+        with col2:
+            overstock_delta = None
+            delta_type = "negative"
+            if inventory_metrics and inventory_metrics.get('overstock_gap_units') is not None:
+                gap_units = inventory_metrics['overstock_gap_units']
+                if gap_units > 0:
+                    overstock_delta = f"{gap_units:,.0f} excess units"
+                    delta_type = "negative"
+                else:
+                    overstock_delta = "Optimized"
+                    delta_type = "positive"
+            st.markdown(
+                create_metric_card(
+                    "Overstock Exposure",
+                    overstock_value,
+                    delta=overstock_delta,
+                    delta_type=delta_type,
+                    icon="📦"
+                ),
+                unsafe_allow_html=True
+            )
+        with col3:
+            peak_month = challenge_insights.get('seasonality_peak')
+            trough_month = challenge_insights.get('seasonality_trough')
+            seasonality_note = None
+            if peak_month and trough_month:
+                seasonality_note = f"Peak: {calendar.month_name[int(peak_month)]}, Low: {calendar.month_name[int(trough_month)]}"
+            st.markdown(
+                create_metric_card(
+                    "Demand Volatility",
+                    volatility_value,
+                    delta=seasonality_note,
+                    delta_type="positive",
+                    icon="🌐"
+                ),
+                unsafe_allow_html=True
+            )
+        
+        st.markdown("""
+- Detect stockouts before they happen by monitoring low stock days and lead-time coverage.
+- Flag costly overstock by benchmarking on-hand units against AI-calculated reorder and max thresholds.
+- Quantify seasonal swings so planners can dial up or down safety stock ahead of peak periods.
+        """)
+    
+    with tabs[1]:
+        st.markdown("#### How does predictive analytics improve forecasting accuracy?")
+        if backtest_metrics:
+            improvement = backtest_metrics['mape_improvement']
+            improvement_wape = backtest_metrics['wape_improvement']
+            mape_delta_type = "positive" if improvement > 0 else "negative"
+            wape_delta_type = "positive" if improvement_wape > 0 else "negative"
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "AI Forecast MAPE",
+                        f"{backtest_metrics['ai_mape']:.1f}%",
+                        delta=f"{improvement:.1f} pts vs naive",
+                        delta_type=mape_delta_type,
+                        icon="🎯"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                st.markdown(
+                    create_metric_card(
+                        "AI Forecast WAPE",
+                        f"{backtest_metrics['ai_wape']:.1f}%",
+                        delta=f"{improvement_wape:.1f} pts improvement",
+                        delta_type=wape_delta_type,
+                        icon="📉"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col3:
+                st.markdown(
+                    create_metric_card(
+                        "Backtest Window",
+                        f"{backtest_metrics['test_days']} days",
+                        delta="Rolling hold-out sample",
+                        delta_type="positive",
+                        icon="⏱️"
+                    ),
+                    unsafe_allow_html=True
+                )
+            
+            fig = go.Figure()
+            test_data = backtest_metrics['test_actuals']
+            fig.add_trace(go.Scatter(
+                x=test_data['date'],
+                y=test_data['sales'],
+                name='Actuals',
+                line=dict(color='#4a5568', width=3)
+            ))
+            fig.add_trace(go.Scatter(
+                x=test_data['date'],
+                y=backtest_metrics['test_forecast'],
+                name='AI Trend Forecast',
+                line=dict(color='#667eea', width=3, dash='dot')
+            ))
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                hovermode='x unified',
+                margin=dict(l=0, r=0, t=20, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Need at least 60 days of history to evidence accuracy gains. Upload more data to unlock the backtest view.")
+        
+        st.markdown("""
+- Rolling backtests show tangible lift versus the naive “last value” approach.
+- Executive KPI: Highlight the accuracy gain (MAPE/WAPE delta) to quantify ROI from predictive analytics.
+- Use the chart to brief leaders on forecast confidence bands and planning readiness.
+        """)
+    
+    with tabs[2]:
+        st.markdown("#### What data sources are essential?")
+        source_df = pd.DataFrame(data_sources)
+        st.dataframe(
+            source_df[['name', 'status', 'detail']],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.markdown("""
+- Confirm baseline datasets: sales history is mandatory, inventory is highly recommended.
+- Layer promotional, pricing, and external signals (weather, macro, regional events) for further accuracy lift.
+- Highlight gaps to procurement/marketing so teams can align on data-sharing roadmaps.
+        """)
+    
+    with tabs[3]:
+        st.markdown("#### Which AI techniques should we deploy?")
+        technique_cards = [
+            ("ARIMA", "Great for stable, stationary demand – quick to deploy for single-SKU forecasting.", "📈"),
+            ("Prophet", "Captures trend shifts, seasonality, and holiday effects with minimal tuning.", "🔮"),
+            ("XGBoost", "Machine learning workhorse that fuses internal and external drivers for complex demand.", "🚀"),
+            ("Ensemble", "Blends statistical + ML models to hedge risk and deliver robust forecasts.", "🎯"),
+        ]
+        col1, col2 = st.columns(2)
+        for idx, (name, desc, icon) in enumerate(technique_cards):
+            container = col1 if idx % 2 == 0 else col2
+            with container:
+                st.markdown(
+                    create_feature_card(
+                        name,
+                        desc,
+                        icon,
+                        action_text="Details"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- Start with ARIMA/Prophet for rapid pilots, then graduate to XGBoost as more features become available.
+- Ensembles are ideal for executive confidence, blending strengths of each technique.
+- Align technique selection with SKU criticality, data richness, and latency requirements.
+        """)
+    
+    with tabs[4]:
+        st.markdown("#### How do MAPE and WAPE frame performance?")
+        if backtest_metrics:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Mean Absolute Percentage Error",
+                        f"{backtest_metrics['ai_mape']:.1f}%",
+                        delta="Lower is better",
+                        delta_type="positive",
+                        icon="📐"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                st.markdown(
+                    create_metric_card(
+                        "Weighted Absolute Percentage Error",
+                        f"{backtest_metrics['ai_wape']:.1f}%",
+                        delta="Revenue-weighted",
+                        delta_type="positive",
+                        icon="⚖️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- **MAPE**: Percentage error per day/SKU – perfect for benchmarking planner accuracy.
+- **WAPE**: Scales error by volume/revenue – ideal for CFO briefings on revenue protection.
+- Track both monthly and by product family to pinpoint where to invest in data or model refinements.
+        """)
+    
+    with tabs[5]:
+        st.markdown("#### Why real-time visibility and automated replenishment matter?")
+        if inventory_metrics:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Current Inventory",
+                        f"{inventory_metrics.get('current_inventory', 0):,.0f} units",
+                        delta=f"Reorder @ {inventory_metrics.get('reorder_point', 0):,.0f}",
+                        delta_type="negative" if inventory_metrics.get('current_inventory', 0) < inventory_metrics.get('reorder_point', 0) else "positive",
+                        icon="📦"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                days_of_stock = inventory_metrics.get('days_of_stock')
+                st.markdown(
+                    create_metric_card(
+                        "Days of Cover",
+                        f"{days_of_stock:.0f} days" if days_of_stock is not None else "—",
+                        delta=f"Lead time: {inventory_metrics.get('lead_time', 0)} days",
+                        delta_type="positive",
+                        icon="🕒"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col3:
+                st.markdown(
+                    create_metric_card(
+                        "Safety Stock",
+                        f"{inventory_metrics.get('safety_stock', 0):,.0f} units",
+                        delta="Auto-adjusted from demand volatility",
+                        delta_type="positive",
+                        icon="🛡️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info("Run the Inventory Optimization workflow to populate live replenishment metrics.")
+        
+        st.markdown("""
+- Always-on telemetry triggers replenishment orders when real inventory crosses AI-calculated thresholds.
+- Automating replenishment lowers manual intervention, shortens cycle times, and boosts service levels.
+- Use these metrics in S&OP meetings to align operations, merchandising, and finance on a single source of truth.
+        """)
+    
+    with tabs[6]:
+        st.markdown("#### How does AI forecasting support sustainability & cost reduction?")
+        if inventory_metrics:
+            carrying_delta = None
+            if inventory_metrics.get('holding_cost') is not None and inventory_metrics.get('overstock_gap_units') is not None:
+                carrying_delta = inventory_metrics['overstock_gap_units'] * inventory_metrics['holding_cost']
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(
+                    create_metric_card(
+                        "Reduced Carrying Cost",
+                        f"${carrying_delta:,.0f}/cycle" if carrying_delta and carrying_delta > 0 else "On target",
+                        delta="Driven by lower safety stock",
+                        delta_type="positive",
+                        icon="💰"
+                    ),
+                    unsafe_allow_html=True
+                )
+            with col2:
+                reorder_qty = inventory_metrics.get('economic_order_quantity')
+                ordering_cost = inventory_metrics.get('ordering_cost')
+                if reorder_qty and ordering_cost:
+                    order_savings = ordering_cost / max(reorder_qty, 1) * 100
+                else:
+                    order_savings = None
+                st.markdown(
+                    create_metric_card(
+                        "Order Efficiency",
+                        f"{reorder_qty:,.0f} EOQ" if reorder_qty else "—",
+                        delta=f"Cost per unit ↓ ~{order_savings:.1f}%" if order_savings else "Balanced batches",
+                        delta_type="positive",
+                        icon="♻️"
+                    ),
+                    unsafe_allow_html=True
+                )
+        st.markdown("""
+- Leaner safety stock cuts energy, storage space, and waste – contributing to Scope 3 reductions.
+- Smarter EOQ and lead-time alignment lowers rush shipments, packaging, and carbon-intensive expedites.
+- Align AI-driven savings to ESG scorecards and cost-to-serve KPIs for executive sign-off.
+        """)
 
 def generate_pdf_report(report_type="Full Report", date_range=None, include_charts=True, include_recommendations=True):
     """Generate a proper PDF report with available data"""
@@ -2609,37 +3274,40 @@ def show_reports_page():
         
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Recent reports section
-    st.markdown("""
-    <div class="section-card">
-        <h3 style="margin-bottom: 1.5rem;">📋 Recent Reports</h3>
-    """, unsafe_allow_html=True)
+    # # Recent reports section
+    # st.markdown("""
+    # <div class="section-card">
+    #     <h3 style="margin-bottom: 1.5rem;">📋 Recent Reports</h3>
+    # """, unsafe_allow_html=True)
     
-    recent_reports = [
-        {'name': 'Monthly Executive Summary', 'date': '2024-01-15', 'size': '2.3 MB', 'type': 'PDF'},
-        {'name': 'Q4 Inventory Analysis', 'date': '2024-01-10', 'size': '1.8 MB', 'type': 'Excel'},
-        {'name': 'Forecast Accuracy Report', 'date': '2024-01-05', 'size': '1.2 MB', 'type': 'PDF'},
-    ]
+    # recent_reports = [
+    #     {'name': 'Monthly Executive Summary', 'date': '2024-01-15', 'size': '2.3 MB', 'type': 'PDF'},
+    #     {'name': 'Q4 Inventory Analysis', 'date': '2024-01-10', 'size': '1.8 MB', 'type': 'Excel'},
+    #     {'name': 'Forecast Accuracy Report', 'date': '2024-01-05', 'size': '1.2 MB', 'type': 'PDF'},
+    # ]
     
-    for report in recent_reports:
-        st.markdown(f"""
-        <div style="background: #f8fafc; padding: 1rem 1.5rem; border-radius: 10px; margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <div style="font-weight: 600; color: #1a202c;">{report['name']}</div>
-                <div style="font-size: 0.875rem; color: #718096; margin-top: 0.25rem;">
-                    {report['date']} • {report['size']} • {report['type']}
-                </div>
-            </div>
-            <button class="action-button" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
-                Download
-            </button>
-        </div>
-        """, unsafe_allow_html=True)
+    # for report in recent_reports:
+    #     st.markdown(f"""
+    #     <div style="background: #f8fafc; padding: 1rem 1.5rem; border-radius: 10px; margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+    #         <div>
+    #             <div style="font-weight: 600; color: #1a202c;">{report['name']}</div>
+    #             <div style="font-size: 0.875rem; color: #718096; margin-top: 0.25rem;">
+    #                 {report['date']} • {report['size']} • {report['type']}
+    #             </div>
+    #         </div>
+    #         <button class="action-button" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
+    #             Download
+    #         </button>
+    #     </div>
+    #     """, unsafe_allow_html=True)
     
-    st.markdown("</div>", unsafe_allow_html=True)
+    # st.markdown("</div>", unsafe_allow_html=True)
 
 # Main application logic
 def main():
+    # Sidebar integration configuration
+    configure_integration_settings()
+    
     # Display header
     show_header()
     
@@ -2657,6 +3325,8 @@ def main():
         show_inventory_page()
     elif st.session_state.current_page == 'analytics':
         show_analytics_page()
+    elif st.session_state.current_page == 'boardroom':
+        show_boardroom_page()
     elif st.session_state.current_page == 'reports':
         show_reports_page()
     
@@ -2669,9 +3339,312 @@ def main():
 
 # Include the actual forecasting and optimization classes from the previous code
 class DemandForecaster:
-    """Handles all forecasting methods"""
-    # ... (include the full implementation from the previous code)
-    pass
+    """Handles forecasting workflows across statistical and ML models."""
+    
+    def __init__(self, df: pd.DataFrame):
+        if df is None or 'date' not in df.columns or 'sales' not in df.columns:
+            raise ValueError("Dataframe must contain 'date' and 'sales' columns.")
+        
+        data = df[['date', 'sales']].dropna().copy()
+        data['date'] = pd.to_datetime(data['date'])
+        data['sales'] = pd.to_numeric(data['sales'], errors='coerce')
+        data = data.dropna(subset=['sales'])
+        data = data.sort_values('date').reset_index(drop=True)
+        
+        if len(data) < 20:
+            raise ValueError("At least 20 records are required for forecasting.")
+        
+        self.data = data
+        self.freq = pd.infer_freq(self.data['date'])
+        if self.freq is None:
+            self.freq = 'D'
+        self.offset = self._get_offset(self.freq)
+    
+    @staticmethod
+    def _get_offset(freq: str):
+        try:
+            return pd.tseries.frequencies.to_offset(freq)
+        except Exception:
+            return pd.tseries.frequencies.to_offset('D')
+    
+    def _seasonal_period(self):
+        if self.freq.startswith('W'):
+            return 52
+        if self.freq.startswith('M'):
+            return 12
+        return 7
+    
+    @staticmethod
+    def _safe_mape(actual, predicted):
+        actual = np.array(actual, dtype=float)
+        predicted = np.array(predicted, dtype=float)
+        mask = actual != 0
+        if mask.sum() == 0:
+            return np.nan
+        return float(np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100)
+    
+    @staticmethod
+    def _safe_wape(actual, predicted):
+        actual = np.array(actual, dtype=float)
+        predicted = np.array(predicted, dtype=float)
+        denom = np.abs(actual).sum()
+        if denom == 0:
+            return np.nan
+        return float(np.abs(actual - predicted).sum() / denom * 100)
+    
+    @staticmethod
+    def _to_float(value):
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return None
+        if isinstance(value, (np.floating, np.integer)):
+            return float(value)
+        return value
+    
+    def _future_dates(self, start_date, periods):
+        return pd.date_range(start=start_date + self.offset, periods=periods, freq=self.freq)
+    
+    def _forecast_arima(self, data, horizon, confidence_level, include_seasonality):
+        series = data.set_index('date')['sales']
+        try:
+            if include_seasonality and len(series) > self._seasonal_period() * 2:
+                model = SARIMAX(
+                    series,
+                    order=(1, 1, 1),
+                    seasonal_order=(1, 0, 1, self._seasonal_period()),
+                    enforce_stationarity=False,
+                    enforce_invertibility=False
+                )
+                fitted = model.fit(disp=False)
+            else:
+                fitted = ARIMA(series, order=(1, 1, 1)).fit()
+        except Exception:
+            fitted = ARIMA(series, order=(1, 1, 1)).fit()
+        
+        forecast_res = fitted.get_forecast(steps=horizon)
+        conf_int = forecast_res.conf_int(alpha=1 - confidence_level)
+        conf_int = conf_int.rename(columns=lambda c: c.replace('lower', 'lower_bound').replace('upper', 'upper_bound'))
+        forecast_mean = forecast_res.predicted_mean
+        future_dates = self._future_dates(series.index[-1], horizon)
+        
+        lower_col = conf_int.columns[0]
+        upper_col = conf_int.columns[1]
+        
+        return pd.DataFrame({
+            'date': future_dates,
+            'forecast': forecast_mean.values,
+            'lower_bound': conf_int[lower_col].values,
+            'upper_bound': conf_int[upper_col].values
+        })
+    
+    def _forecast_prophet(self, data, horizon, confidence_level, include_seasonality, include_holidays):
+        prophet_df = data.rename(columns={'date': 'ds', 'sales': 'y'})
+        model = Prophet(
+            interval_width=confidence_level,
+            yearly_seasonality=include_seasonality,
+            weekly_seasonality=include_seasonality,
+            daily_seasonality=False
+        )
+        if include_holidays:
+            try:
+                model.add_country_holidays(country_name='US')
+            except Exception:
+                pass
+        model.fit(prophet_df)
+        future = model.make_future_dataframe(periods=horizon, freq=self.freq)
+        forecast = model.predict(future)
+        tail = forecast.tail(horizon)
+        return pd.DataFrame({
+            'date': pd.to_datetime(tail['ds']),
+            'forecast': tail['yhat'].values,
+            'lower_bound': tail['yhat_lower'].values,
+            'upper_bound': tail['yhat_upper'].values
+        })
+    
+    def _forecast_xgboost(self, data, horizon, confidence_level):
+        df = data.copy()
+        df['lag_1'] = df['sales'].shift(1)
+        df['lag_7'] = df['sales'].shift(7)
+        df['lag_14'] = df['sales'].shift(14)
+        df['lag_30'] = df['sales'].shift(30)
+        df['dayofweek'] = df['date'].dt.dayofweek
+        df['month'] = df['date'].dt.month
+        
+        feature_cols = ['lag_1', 'lag_7', 'lag_14', 'lag_30', 'dayofweek', 'month']
+        df = df.dropna(subset=feature_cols + ['sales'])
+        if len(df) < 30:
+            raise ValueError("Not enough history for XGBoost forecasting.")
+        
+        X = df[feature_cols]
+        y = df['sales']
+        model = xgb.XGBRegressor(
+            n_estimators=400,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective='reg:squarederror',
+            random_state=42
+        )
+        model.fit(X, y)
+        residuals = y - model.predict(X)
+        residual_std = float(residuals.std()) if residuals.std() > 0 else float(y.std() * 0.1)
+        z_score = 1.96 if confidence_level >= 0.95 else 1.65
+        buffer = residual_std * z_score
+        
+        history = data[['date', 'sales']].copy().reset_index(drop=True)
+        predictions = []
+        
+        for _ in range(horizon):
+            next_date = history['date'].iloc[-1] + self.offset
+            history_values = history['sales']
+            features = {
+                'lag_1': history_values.iloc[-1],
+                'lag_7': history_values.iloc[-7] if len(history_values) >= 7 else history_values.iloc[-1],
+                'lag_14': history_values.iloc[-14] if len(history_values) >= 14 else history_values.iloc[-1],
+                'lag_30': history_values.iloc[-30] if len(history_values) >= 30 else history_values.iloc[-1],
+                'dayofweek': next_date.dayofweek,
+                'month': next_date.month
+            }
+            pred = float(model.predict(pd.DataFrame([features]))[0])
+            predictions.append({
+                'date': next_date,
+                'forecast': pred,
+                'lower_bound': max(pred - buffer, 0),
+                'upper_bound': pred + buffer
+            })
+            history = pd.concat([history, pd.DataFrame({'date': [next_date], 'sales': [pred]})], ignore_index=True)
+        
+        return pd.DataFrame(predictions)
+    
+    def _forecast_ensemble(self, data, horizon, confidence_level, include_seasonality, include_holidays):
+        forecasts = []
+        for method in ('arima', 'prophet', 'xgboost'):
+            try:
+                fc = self._forecast_model(
+                    data,
+                    method,
+                    horizon,
+                    confidence_level,
+                    include_seasonality,
+                    include_holidays
+                ).set_index('date')
+                fc = fc.rename(columns={
+                    'forecast': f'forecast_{method}',
+                    'lower_bound': f'lower_bound_{method}',
+                    'upper_bound': f'upper_bound_{method}'
+                })
+                forecasts.append(fc)
+            except Exception:
+                continue
+        if not forecasts:
+            raise ValueError("No base models produced forecasts for the ensemble.")
+        
+        combined = pd.concat(forecasts, axis=1)
+        forecast_cols = [col for col in combined.columns if col.startswith('forecast_')]
+        lower_cols = [col for col in combined.columns if col.startswith('lower_bound_')]
+        upper_cols = [col for col in combined.columns if col.startswith('upper_bound_')]
+        
+        result = pd.DataFrame({
+            'date': combined.index,
+            'forecast': combined[forecast_cols].mean(axis=1),
+            'lower_bound': combined[lower_cols].min(axis=1),
+            'upper_bound': combined[upper_cols].max(axis=1)
+        }).reset_index(drop=True)
+        return result
+    
+    def _forecast_model(self, data, model_name, horizon, confidence_level, include_seasonality, include_holidays):
+        model_name = model_name.lower()
+        if model_name == 'arima':
+            return self._forecast_arima(data, horizon, confidence_level, include_seasonality)
+        if model_name == 'prophet':
+            return self._forecast_prophet(data, horizon, confidence_level, include_seasonality, include_holidays)
+        if model_name == 'xgboost':
+            return self._forecast_xgboost(data, horizon, confidence_level)
+        if model_name == 'ensemble':
+            return self._forecast_ensemble(data, horizon, confidence_level, include_seasonality, include_holidays)
+        raise ValueError(f"Unsupported model {model_name}")
+    
+    def _train_test_split(self, test_window=None):
+        n = len(self.data)
+        if n < 20:
+            raise ValueError("Not enough records for backtesting.")
+        if test_window is None:
+            test_window = max(14, int(n * 0.2))
+        test_window = min(max(test_window, 7), n - 7)
+        if test_window <= 0:
+            test_window = max(7, n // 3)
+        train = self.data.iloc[:-test_window].copy()
+        test = self.data.iloc[-test_window:].copy()
+        return train, test
+    
+    def backtest(self, model_name='prophet', test_window=None, confidence_level=0.95, include_seasonality=True, include_holidays=False):
+        train, test = self._train_test_split(test_window)
+        horizon = len(test)
+        forecast_df = self._forecast_model(train, model_name, horizon, confidence_level, include_seasonality, include_holidays)
+        forecast_df = forecast_df.sort_values('date').reset_index(drop=True)
+        
+        baseline_forecast = np.repeat(train['sales'].iloc[-1], horizon)
+        ai_forecast = forecast_df['forecast'].values
+        actuals = test['sales'].values
+        
+        baseline_mape = self._safe_mape(actuals, baseline_forecast)
+        ai_mape = self._safe_mape(actuals, ai_forecast)
+        baseline_wape = self._safe_wape(actuals, baseline_forecast)
+        ai_wape = self._safe_wape(actuals, ai_forecast)
+        
+        metrics = {
+            'model': model_name.upper(),
+            'test_days': horizon,
+            'training_records': len(train),
+            'baseline_mape': self._to_float(baseline_mape),
+            'ai_mape': self._to_float(ai_mape),
+            'baseline_wape': self._to_float(baseline_wape),
+            'ai_wape': self._to_float(ai_wape),
+            'mape_improvement': self._to_float(baseline_mape - ai_mape) if baseline_mape is not None and ai_mape is not None and not np.isnan(baseline_mape) and not np.isnan(ai_mape) else None,
+            'wape_improvement': self._to_float(baseline_wape - ai_wape) if baseline_wape is not None and ai_wape is not None and not np.isnan(baseline_wape) and not np.isnan(ai_wape) else None,
+            'ai_rmse': self._to_float(sqrt(mean_squared_error(actuals, ai_forecast))),
+            'ai_mae': self._to_float(mean_absolute_error(actuals, ai_forecast)),
+            'test_actuals': test.reset_index(drop=True),
+            'test_forecast': ai_forecast.tolist(),
+            'forecast_dates': forecast_df['date'].tolist()
+        }
+        return metrics
+    
+    def forecast(self, model_name='prophet', horizon=30, confidence_level=0.95, include_seasonality=True, include_holidays=False):
+        horizon = int(horizon)
+        if horizon <= 0:
+            raise ValueError("Forecast horizon must be positive.")
+        
+        forecast_df = self._forecast_model(
+            self.data,
+            model_name,
+            horizon,
+            confidence_level,
+            include_seasonality,
+            include_holidays
+        )
+        forecast_df['method'] = model_name
+        
+        backtest_metrics = self.backtest(
+            model_name=model_name,
+            confidence_level=confidence_level,
+            include_seasonality=include_seasonality,
+            include_holidays=include_holidays
+        )
+        
+        summary = {
+            'avg_forecast': self._to_float(forecast_df['forecast'].mean()),
+            'total_forecast': self._to_float(forecast_df['forecast'].sum()),
+            'peak_date': forecast_df.loc[forecast_df['forecast'].idxmax(), 'date'].strftime('%Y-%m-%d') if len(forecast_df) else None,
+            'peak_value': self._to_float(forecast_df['forecast'].max())
+        }
+        
+        return {
+            'forecast': forecast_df,
+            'metrics': backtest_metrics,
+            'summary': summary,
+            'backtest': backtest_metrics
+        }
 
 class InventoryOptimizer:
     """Handles inventory optimization calculations"""
