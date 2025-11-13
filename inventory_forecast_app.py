@@ -463,7 +463,7 @@ st.markdown("""
     }
     
     /* Streamlit Overrides */
-    /* Targeted heading colors: dark headings on white cards, white headings on colored headers */
+    /* Targeted heading colors: dark headings on white cards, white headings on dark headers */
 
     /* Headings that live in white/neutral cards and chart containers -> dark */
     .section-card h1,
