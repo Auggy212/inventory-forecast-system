@@ -1614,7 +1614,7 @@ def show_forecast_page():
         <style>
             button[data-testid="baseButton-secondary"][aria-label*="{selected_model}"] {{
                 background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
-                color: white !important;
+                color: black !important;
                 border: 3px solid #10b981 !important;
                 box-shadow: 0 8px 25px rgba(16, 185, 129, 0.5) !important;
                 font-weight: 700 !important;
