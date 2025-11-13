@@ -354,13 +354,13 @@ st.markdown("""
     .model-selection-banner-title {
         font-size: 1.125rem;
         font-weight: 700;
-        color: #e6e6e6;
+        color: #000000;
         margin: 0;
     }
     
     .model-selection-banner-subtitle {
         font-size: 0.875rem;
-        color: #e6e6e6;
+        color: #333333;
         margin: 0.25rem 0 0 0;
     }
     
