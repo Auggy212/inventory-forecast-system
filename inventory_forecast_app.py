@@ -354,7 +354,7 @@ st.markdown("""
     .model-selection-banner-title {
         font-size: 1.125rem;
         font-weight: 700;
-        color: #1e40af;
+        color: black;
         margin: 0;
     }
     
