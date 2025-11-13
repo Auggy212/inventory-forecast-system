@@ -532,7 +532,7 @@ st.markdown("""
     div[data-testid="stButton"]:has(button[aria-pressed="true"]) button,
     .model-selected-button {
         background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
-        color: white !important;
+        color: #e6e6e6 !important;
         border: 3px solid #10b981 !important;
         box-shadow: 0 8px 25px rgba(16, 185, 129, 0.5) !important;
         font-weight: 700 !important;
