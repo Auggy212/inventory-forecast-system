@@ -493,7 +493,7 @@ st.markdown("""
     .header-content .sub-title,
     .model-selection-banner-title,
     .model-selection-banner-subtitle {
-        color: #ffffff !important;
+        color: #e6e6e6 !important;
         -webkit-text-fill-color: #ffffff !important;
         opacity: 1 !important;
     }
